@@ -1,0 +1,25 @@
+server:
+  port: 8080
+
+spring:
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/taos_lab}
+    username: ${DB_USER:taos}
+    password: ${DB_PASSWORD:taos}
+  flyway:
+    enabled: true
+
+mybatis:
+  configuration:
+    map-underscore-to-camel-case: true
+
+lab:
+  mqtt:
+    url: ${MQTT_URL:tcp://localhost:1883}
+    topic: ${MQTT_TOPIC:taos/lab/telemetry}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info

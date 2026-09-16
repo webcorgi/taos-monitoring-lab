@@ -1,0 +1,9 @@
+{
+  "name": "taos-queue-demo",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "bullmq": "^5.58.5",
+    "ioredis": "^5.7.0"
+  }
+}

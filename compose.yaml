@@ -1,0 +1,103 @@
+name: taos-monitoring-lab
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-taos_lab}
+      POSTGRES_USER: ${POSTGRES_USER:-taos}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-taos}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-taos} -d ${POSTGRES_DB:-taos_lab}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  mosquitto:
+    image: eclipse-mosquitto:2
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+
+  backend:
+    build: ./backend
+    environment:
+      DB_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-taos_lab}
+      DB_USER: ${POSTGRES_USER:-taos}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-taos}
+      MQTT_URL: tcp://mosquitto:1883
+      MQTT_TOPIC: taos/lab/telemetry
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mosquitto:
+        condition: service_started
+
+  simulator:
+    build: ./simulator
+    environment:
+      MQTT_HOST: mosquitto
+      MQTT_PORT: 1883
+      MQTT_TOPIC: taos/lab/telemetry
+      DEVICE_ID: ESS-LAB-01
+      ANOMALY_EVERY: ${ANOMALY_EVERY:-15}
+    depends_on:
+      - mosquitto
+
+  ai-worker:
+    build: ./ai-worker
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-taos}:${POSTGRES_PASSWORD:-taos}@postgres:5432/${POSTGRES_DB:-taos_lab}
+      POLL_SECONDS: 4
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "8088:80"
+    depends_on:
+      - backend
+
+  adminer:
+    image: adminer:4
+    ports:
+      - "8081:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  redis:
+    image: redis:7-alpine
+    profiles: ["queue"]
+    ports:
+      - "6379:6379"
+
+  queue-worker:
+    build: ./queue-demo
+    command: ["node", "worker.js"]
+    environment:
+      REDIS_URL: redis://redis:6379
+    profiles: ["queue"]
+    depends_on:
+      - redis
+
+  queue-producer:
+    build: ./queue-demo
+    command: ["node", "producer.js"]
+    environment:
+      REDIS_URL: redis://redis:6379
+    profiles: ["queue"]
+    depends_on:
+      - redis
+
+volumes:
+  postgres_data:
