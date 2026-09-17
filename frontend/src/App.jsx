@@ -2,6 +2,44 @@ import React, { useEffect, useMemo, useState } from 'react';
 
 const LAB_DEVICE_ID = 'ESS-LAB-02';
 
+const SCENARIOS = {
+  baseline: {
+    step: '①',
+    title: '기준 데이터 25개',
+    shortTitle: '기준 패턴 만들기',
+    description: '약 30℃ / 815V의 평소 패턴을 한 번에 생성',
+    expectation: 'AI가 판단할 기준 데이터를 확보합니다.',
+  },
+  normal: {
+    step: '②',
+    title: '정상값 31℃',
+    shortTitle: '정상 데이터',
+    description: '평소와 비슷한 한 건을 MQTT로 전송',
+    expectation: 'Quality는 GOOD, AI도 보통 NORMAL 쪽입니다.',
+  },
+  hot: {
+    step: '③',
+    title: '고온 85℃',
+    shortTitle: '고온 이상',
+    description: '허용 범위 안이지만 평소와 크게 다른 값',
+    expectation: 'Quality는 GOOD이어도 AI는 ANOMALY로 볼 수 있습니다.',
+  },
+  'voltage-drop': {
+    step: '④',
+    title: '전압 급락 690V',
+    shortTitle: '전압 급락',
+    description: '평소 810V대에서 갑자기 690V로 하락',
+    expectation: 'Quality는 GOOD이어도 큰 변화량을 AI가 볼 수 있습니다.',
+  },
+  'sensor-error': {
+    step: '⑤',
+    title: '센서 오류 130℃',
+    shortTitle: '범위 오류',
+    description: '물리 허용 범위를 벗어난 값을 전송',
+    expectation: 'OUT_OF_RANGE로 저장되고 AI 분석 대상에서는 제외됩니다.',
+  },
+};
+
 function Metric({ label, value, unit }) {
   return (
     <div className="metric">
@@ -33,13 +71,48 @@ function LineChart({ rows }) {
   );
 }
 
-function ScenarioButton({ title, description, busy, onClick }) {
+function ScenarioButton({ scenarioKey, meta, active, busy, onClick }) {
   return (
-    <button className="scenario-button" type="button" disabled={busy} onClick={onClick}>
-      <strong>{title}</strong>
-      <span>{description}</span>
+    <button
+      className={`scenario-button ${active ? 'active' : ''}`}
+      type="button"
+      disabled={busy}
+      onClick={() => onClick(scenarioKey)}
+    >
+      <strong>{meta.step} {meta.title}</strong>
+      <span>{meta.description}</span>
     </button>
   );
+}
+
+function Stage({ label, detail, status = 'pending' }) {
+  const symbol = status === 'done' ? '✓' : status === 'working' ? '…' : status === 'skipped' ? '−' : '·';
+  return (
+    <div className={`flow-stage ${status}`}>
+      <i>{symbol}</i>
+      <div>
+        <strong>{label}</strong>
+        <span>{detail}</span>
+      </div>
+    </div>
+  );
+}
+
+function parseFeatures(prediction) {
+  if (!prediction?.features) return null;
+  try {
+    return typeof prediction.features === 'string'
+      ? JSON.parse(prediction.features)
+      : prediction.features;
+  } catch {
+    return null;
+  }
+}
+
+function signed(value, digits = 1) {
+  if (value == null || Number.isNaN(value)) return '-';
+  const n = Number(value);
+  return `${n > 0 ? '+' : ''}${n.toFixed(digits)}`;
 }
 
 export default function App() {
@@ -51,6 +124,8 @@ export default function App() {
   const [scenarioBusy, setScenarioBusy] = useState('');
   const [scenarioMessage, setScenarioMessage] = useState('');
   const [scenarioError, setScenarioError] = useState('');
+  const [activeScenario, setActiveScenario] = useState('');
+  const [scenarioStartedAt, setScenarioStartedAt] = useState(0);
 
   const loadData = async () => {
     try {
@@ -75,11 +150,13 @@ export default function App() {
 
   useEffect(() => {
     loadData();
-    const timer = setInterval(loadData, 2000);
+    const timer = setInterval(loadData, 1500);
     return () => clearInterval(timer);
   }, []);
 
   const runScenario = async (scenario) => {
+    setActiveScenario(scenario);
+    setScenarioStartedAt(Date.now());
     setScenarioBusy(scenario);
     setScenarioMessage('');
     setScenarioError('');
@@ -89,7 +166,9 @@ export default function App() {
       const body = await response.json();
       if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
       setScenarioMessage(body.message);
-      setTimeout(loadData, 600);
+      setTimeout(loadData, 300);
+      setTimeout(loadData, 1200);
+      setTimeout(loadData, 4500);
     } catch (e) {
       setScenarioError(e.message);
     } finally {
@@ -99,11 +178,72 @@ export default function App() {
 
   const latest = rows[0];
   const labLatest = labRows[0];
+  const labPrevious = labRows[1];
   const aiText = prediction ? (prediction.isAnomaly ? 'ANOMALY' : 'NORMAL') : 'LEARNING';
   const aiClass = prediction?.isAnomaly ? 'danger' : 'normal';
-  const labAiText = labPrediction ? (labPrediction.isAnomaly ? 'ANOMALY' : 'NORMAL') : 'LEARNING';
-  const labAiClass = labPrediction?.isAnomaly ? 'danger' : 'normal';
   const latestTime = useMemo(() => latest ? new Date(latest.observedAt).toLocaleString('ko-KR') : '-', [latest]);
+
+  const activeMeta = activeScenario ? SCENARIOS[activeScenario] : null;
+  const labFeatures = parseFeatures(labPrediction);
+  const latestObservedMs = labLatest ? new Date(labLatest.observedAt).getTime() : 0;
+  const predictionObservedMs = labPrediction ? new Date(labPrediction.observedAt).getTime() : 0;
+  const dbArrived = Boolean(activeScenario && labLatest && latestObservedMs >= scenarioStartedAt - 3000);
+  const mqttPublished = Boolean(activeScenario && scenarioMessage);
+  const sensorExcluded = activeScenario === 'sensor-error' && dbArrived && labLatest?.qualityStatus === 'OUT_OF_RANGE';
+  const aiCaughtUp = Boolean(
+    dbArrived
+    && !sensorExcluded
+    && labPrediction
+    && Math.abs(predictionObservedMs - latestObservedMs) < 1500
+  );
+  const rawTempDelta = labLatest && labPrevious ? labLatest.temperature - labPrevious.temperature : null;
+  const rawVoltageDelta = labLatest && labPrevious ? labLatest.voltage - labPrevious.voltage : null;
+
+  let resultTone = 'waiting';
+  let resultTitle = '실습 버튼을 눌러보세요';
+  let resultDescription = '버튼을 누르면 데이터가 MQTT부터 DB와 AI까지 실제 경로를 따라갑니다.';
+
+  if (activeMeta) {
+    if (scenarioError) {
+      resultTone = 'danger';
+      resultTitle = `${activeMeta.shortTitle} 전송 실패`;
+      resultDescription = scenarioError;
+    } else if (!dbArrived) {
+      resultTone = 'working';
+      resultTitle = `${activeMeta.shortTitle} · 전달 중`;
+      resultDescription = scenarioMessage || 'Spring 테스트 API에서 MQTT로 데이터를 발행하고 있습니다.';
+    } else if (sensorExcluded) {
+      resultTone = 'warning';
+      resultTitle = '130℃ → OUT_OF_RANGE → AI 제외';
+      resultDescription = 'DB에는 저장됐지만 물리 범위를 벗어나 AI가 이 행을 학습하거나 판단하지 않습니다.';
+    } else if (!aiCaughtUp) {
+      resultTone = 'working';
+      resultTitle = `${labLatest.temperature.toFixed(1)}℃ 저장 완료 · AI 분석 대기`;
+      resultDescription = `Quality ${labLatest.qualityStatus}. AI Worker가 다음 분석 주기에서 이 데이터를 확인합니다.`;
+    } else if (labPrediction.isAnomaly) {
+      resultTone = 'danger';
+      resultTitle = `${labLatest.temperature.toFixed(1)}℃ → AI ANOMALY`;
+      resultDescription = `Quality는 ${labLatest.qualityStatus}이지만 평소 패턴과 달라 AI가 이상으로 분류했습니다.`;
+    } else {
+      resultTone = 'success';
+      resultTitle = `${labLatest.temperature.toFixed(1)}℃ → AI NORMAL`;
+      resultDescription = `Quality ${labLatest.qualityStatus}, AI도 현재 데이터를 정상 패턴으로 분류했습니다.`;
+    }
+  }
+
+  const qualityMeaning = !labLatest
+    ? '데이터 없음'
+    : labLatest.qualityStatus === 'OUT_OF_RANGE'
+      ? '물리 범위를 벗어난 값'
+      : '정해둔 물리 범위 안의 값';
+
+  const aiMeaning = sensorExcluded
+    ? '품질 오류라 이번 행은 AI에서 제외'
+    : !labPrediction
+      ? '20개 이상 모이면 AI 판단 시작'
+      : aiCaughtUp
+        ? (labPrediction.isAnomaly ? '평소 패턴과 다름' : '평소 패턴과 비슷함')
+        : '최신 데이터 분석 대기 중';
 
   return (
     <main>
@@ -114,7 +254,7 @@ export default function App() {
           <p className="muted">Sensor → MQTT → Spring → PostgreSQL → AI → React</p>
         </div>
         <div className={`ai ${aiClass}`}>
-          <span>AI</span>
+          <span>전체 최신 AI</span>
           <strong>{aiText}</strong>
           <small>{prediction ? `score ${prediction.anomalyScore.toFixed(4)}` : '20개 수집 후 시작'}</small>
         </div>
@@ -135,74 +275,128 @@ export default function App() {
             <p className="eyebrow">HANDS-ON LAB</p>
             <h2>실습 컨트롤 · {LAB_DEVICE_ID}</h2>
           </div>
-          <span>명령어 대신 버튼으로 데이터 흐름 확인</span>
+          <span>버튼을 누른 뒤 아래 결과판만 보면 됩니다</span>
         </div>
-
-        <div className="lab-flow">
-          <span>버튼</span><b>→</b><span>Spring 테스트 API</span><b>→</b><span>MQTT</span><b>→</b><span>Spring 수신</span><b>→</b><span>DB</span><b>→</b><span>AI</span><b>→</b><span>화면</span>
-        </div>
-
-        <p className="lab-guide">
-          먼저 <strong>① 기준 데이터 25개</strong>를 눌러 AI가 판단할 재료를 만든 뒤, 나머지 버튼을 하나씩 눌러 값·Quality·AI 결과가 어떻게 달라지는지 보세요.
-        </p>
 
         <div className="scenario-grid">
-          <ScenarioButton
-            title="① 기준 데이터 25개"
-            description="약 30℃의 평소 패턴을 한 번에 생성"
-            busy={Boolean(scenarioBusy)}
-            onClick={() => runScenario('baseline')}
-          />
-          <ScenarioButton
-            title="② 정상값 31℃"
-            description="평소와 비슷한 한 건을 MQTT로 전송"
-            busy={Boolean(scenarioBusy)}
-            onClick={() => runScenario('normal')}
-          />
-          <ScenarioButton
-            title="③ 고온 85℃"
-            description="범위 안이지만 평소와 크게 다른 값"
-            busy={Boolean(scenarioBusy)}
-            onClick={() => runScenario('hot')}
-          />
-          <ScenarioButton
-            title="④ 전압 급락 690V"
-            description="전압 변화량이 큰 상황 재현"
-            busy={Boolean(scenarioBusy)}
-            onClick={() => runScenario('voltage-drop')}
-          />
-          <ScenarioButton
-            title="⑤ 센서 오류 130℃"
-            description="OUT_OF_RANGE 처리와 AI 제외 확인"
-            busy={Boolean(scenarioBusy)}
-            onClick={() => runScenario('sensor-error')}
-          />
+          {Object.entries(SCENARIOS).map(([key, meta]) => (
+            <ScenarioButton
+              key={key}
+              scenarioKey={key}
+              meta={meta}
+              active={activeScenario === key}
+              busy={Boolean(scenarioBusy)}
+              onClick={runScenario}
+            />
+          ))}
         </div>
 
-        {scenarioBusy && <div className="lab-status">MQTT로 테스트 데이터를 전송 중입니다...</div>}
-        {scenarioMessage && <div className="lab-status success">{scenarioMessage}</div>}
+        {activeMeta && (
+          <div className="expectation">
+            <b>{activeMeta.step} 예상:</b> {activeMeta.expectation}
+          </div>
+        )}
+
+        <div className={`result-banner ${resultTone}`}>
+          <div className="result-icon">
+            {resultTone === 'success' ? '✓' : resultTone === 'danger' ? '!' : resultTone === 'warning' ? '!' : resultTone === 'working' ? '…' : '▶'}
+          </div>
+          <div>
+            <span>지금 일어난 일</span>
+            <strong>{resultTitle}</strong>
+            <p>{resultDescription}</p>
+          </div>
+        </div>
+
+        <div className="pipeline-title">
+          <strong>실제 데이터 흐름</strong>
+          <span>완료된 단계가 순서대로 켜집니다.</span>
+        </div>
+        <div className="pipeline-grid">
+          <Stage label="버튼" detail="시나리오 실행" status={activeScenario ? 'done' : 'pending'} />
+          <Stage label="MQTT" detail="Broker에 publish" status={mqttPublished ? 'done' : activeScenario ? 'working' : 'pending'} />
+          <Stage label="Spring" detail="subscribe + JSON 처리" status={dbArrived ? 'done' : mqttPublished ? 'working' : 'pending'} />
+          <Stage label="PostgreSQL" detail="measurement 저장" status={dbArrived ? 'done' : 'pending'} />
+          <Stage
+            label="AI Worker"
+            detail={sensorExcluded ? '품질 오류라 제외' : aiCaughtUp ? '최신값 분석 완료' : '분석 주기 대기'}
+            status={sensorExcluded ? 'skipped' : aiCaughtUp ? 'done' : dbArrived ? 'working' : 'pending'}
+          />
+          <Stage label="React" detail="화면 재조회/반영" status={dbArrived ? 'done' : 'pending'} />
+        </div>
+
+        <div className="compare-grid">
+          <div className="compare-card raw">
+            <span className="compare-label">① 들어온 원본값</span>
+            <strong>{labLatest ? `${labLatest.temperature.toFixed(1)}℃` : '-'}</strong>
+            <p>{labLatest ? `${labLatest.voltage.toFixed(1)}V · ${labLatest.current.toFixed(1)}A · SOC ${labLatest.soc.toFixed(1)}%` : '아직 데이터 없음'}</p>
+            <div className="delta-row">
+              <span>직전 대비 온도 <b>{signed(rawTempDelta)}℃</b></span>
+              <span>직전 대비 전압 <b>{signed(rawVoltageDelta)}V</b></span>
+            </div>
+          </div>
+
+          <div className={`compare-card quality-card ${labLatest?.qualityStatus === 'OUT_OF_RANGE' ? 'bad' : 'good'}`}>
+            <span className="compare-label">② 규칙 검사 · Quality</span>
+            <strong>{labLatest?.qualityStatus ?? '-'}</strong>
+            <p>{qualityMeaning}</p>
+            <small>현재 규칙: 온도 -40~120℃, 전압 0~1200V, SOC 0~100%</small>
+          </div>
+
+          <div className={`compare-card ai-card ${sensorExcluded ? 'skipped' : aiCaughtUp && labPrediction?.isAnomaly ? 'bad' : aiCaughtUp ? 'good' : ''}`}>
+            <span className="compare-label">③ 패턴 검사 · AI</span>
+            <strong>{sensorExcluded ? 'EXCLUDED' : !labPrediction ? 'LEARNING' : aiCaughtUp ? (labPrediction.isAnomaly ? 'ANOMALY' : 'NORMAL') : 'ANALYZING'}</strong>
+            <p>{aiMeaning}</p>
+            <small>
+              {sensorExcluded
+                ? 'OUT_OF_RANGE 행은 AI 입력에서 제외'
+                : labPrediction && aiCaughtUp
+                  ? `score ${labPrediction.anomalyScore.toFixed(4)} · sample ${labFeatures?.sample_count ?? '-'}개`
+                  : 'AI는 약 4초 주기로 DB를 확인'}
+            </small>
+          </div>
+        </div>
+
+        {aiCaughtUp && labFeatures && (
+          <div className="ai-feature-strip">
+            <span>AI가 실제로 본 변화량</span>
+            <b>temperature_delta {signed(labFeatures.temperature_delta)}℃</b>
+            <b>voltage_delta {signed(labFeatures.voltage_delta)}V</b>
+            <small>값 자체뿐 아니라 직전 값과 얼마나 달라졌는지도 Feature로 사용합니다.</small>
+          </div>
+        )}
+
         {scenarioError && <div className="lab-status failure">실습 전송 실패: {scenarioError}</div>}
 
-        <div className="lab-observation">
-          <div>
-            <span>최근 실습값</span>
-            <strong>{labLatest ? `${labLatest.temperature.toFixed(1)}℃ / ${labLatest.voltage.toFixed(1)}V` : '-'}</strong>
-            <small>{labLatest ? new Date(labLatest.observedAt).toLocaleTimeString('ko-KR') : '아직 ESS-LAB-02 데이터 없음'}</small>
-          </div>
-          <div>
-            <span>Quality</span>
-            <strong className={labLatest?.qualityStatus === 'OUT_OF_RANGE' ? 'text-danger' : ''}>{labLatest?.qualityStatus ?? '-'}</strong>
-            <small>물리 범위 검사</small>
-          </div>
-          <div className={`lab-ai ${labAiClass}`}>
-            <span>ESS-LAB-02 AI</span>
-            <strong>{labAiText}</strong>
-            <small>{labPrediction ? `score ${labPrediction.anomalyScore.toFixed(4)}` : `${labRows.length}/20개 수집`}</small>
-          </div>
+        <div className="lab-table-title">
+          <strong>{LAB_DEVICE_ID} 최근 실습 데이터</strong>
+          <span>다른 장비 데이터에 묻히지 않도록 이 장비만 표시</span>
+        </div>
+        <div className="table-wrap lab-table-wrap">
+          <table>
+            <thead>
+              <tr><th>Time</th><th>V</th><th>Temp</th><th>ΔTemp</th><th>Quality</th></tr>
+            </thead>
+            <tbody>
+              {labRows.slice(0, 6).map((r, index) => {
+                const older = labRows[index + 1];
+                const delta = older ? r.temperature - older.temperature : null;
+                return (
+                  <tr key={r.id} className={index === 0 ? 'latest-lab-row' : ''}>
+                    <td>{new Date(r.observedAt).toLocaleTimeString('ko-KR')}</td>
+                    <td>{r.voltage.toFixed(1)}</td>
+                    <td><b>{r.temperature.toFixed(1)}℃</b></td>
+                    <td className={Math.abs(delta ?? 0) >= 10 ? 'text-danger' : ''}>{signed(delta)}℃</td>
+                    <td><span className={`quality ${r.qualityStatus === 'GOOD' ? '' : 'bad'}`}>{r.qualityStatus}</span></td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </div>
 
         <p className="lab-note">
-          85℃는 현재 품질 규칙상 GOOD이지만 평소 패턴과 멀어 AI가 이상으로 판단할 수 있습니다. 반대로 130℃는 OUT_OF_RANGE라 AI 학습 대상에서 빠집니다. AI는 약 4초 주기로 분석하므로 결과가 바로 바뀌지 않을 수 있습니다.
+          핵심: <b>Quality</b>는 사람이 정한 물리 범위 검사이고, <b>AI</b>는 평소 데이터 패턴과 다른지를 보는 검사입니다. 그래서 85℃나 690V가 Quality는 GOOD인데 AI는 ANOMALY일 수 있습니다.
         </p>
       </section>
 
@@ -217,7 +411,7 @@ export default function App() {
       <section className="panel">
         <div className="panel-title">
           <h2>Recent telemetry</h2>
-          <span>최근 10건</span>
+          <span>전체 장비 최근 10건</span>
         </div>
         <div className="table-wrap">
           <table>
