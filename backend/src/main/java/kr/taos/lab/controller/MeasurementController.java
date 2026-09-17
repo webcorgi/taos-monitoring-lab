@@ -19,8 +19,14 @@ public class MeasurementController {
     }
 
     @GetMapping
-    public List<Measurement> recent(@RequestParam(defaultValue = "50") int limit) {
-        return service.recent(limit);
+    public List<Measurement> recent(
+            @RequestParam(defaultValue = "50") int limit,
+            @RequestParam(required = false) String deviceId
+    ) {
+        if (deviceId == null || deviceId.isBlank()) {
+            return service.recent(limit);
+        }
+        return service.recentByDevice(deviceId, limit);
     }
 
     @PostMapping

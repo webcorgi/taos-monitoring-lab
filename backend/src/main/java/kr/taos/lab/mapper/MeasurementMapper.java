@@ -37,4 +37,17 @@ public interface MeasurementMapper {
         LIMIT #{limit}
         """)
     List<Measurement> findRecent(@Param("limit") int limit);
+
+    @Select("""
+        SELECT id, device_id, observed_at, voltage, current, soc, temperature,
+               quality_status, ingested_at
+        FROM measurement
+        WHERE device_id = #{deviceId}
+        ORDER BY observed_at DESC
+        LIMIT #{limit}
+        """)
+    List<Measurement> findRecentByDevice(
+            @Param("deviceId") String deviceId,
+            @Param("limit") int limit
+    );
 }

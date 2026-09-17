@@ -36,6 +36,11 @@ public class MeasurementService {
         return mapper.findRecent(safeLimit);
     }
 
+    public List<Measurement> recentByDevice(String deviceId, int limit) {
+        int safeLimit = Math.max(1, Math.min(limit, 200));
+        return mapper.findRecentByDevice(deviceId, safeLimit);
+    }
+
     private void validateRequired(TelemetryPayload p) {
         if (p == null || p.deviceId() == null || p.deviceId().isBlank()) {
             throw new IllegalArgumentException("deviceId is required");

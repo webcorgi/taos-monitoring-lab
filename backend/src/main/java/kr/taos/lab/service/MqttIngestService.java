@@ -69,6 +69,27 @@ public class MqttIngestService {
         }
     }
 
+    public synchronized void publishTelemetry(TelemetryPayload payload) {
+        try {
+            if (client == null || !client.isConnected()) {
+                ensureConnected();
+            }
+            if (client == null || !client.isConnected()) {
+                throw new IllegalStateException("MQTT broker에 연결되어 있지 않습니다.");
+            }
+
+            MqttMessage message = new MqttMessage(objectMapper.writeValueAsBytes(payload));
+            message.setQos(1);
+            message.setRetained(false);
+            client.publish(topic, message);
+            log.info("lab telemetry published device={} time={}", payload.deviceId(), payload.timestamp());
+        } catch (IllegalStateException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IllegalStateException("MQTT 테스트 데이터 전송에 실패했습니다: " + e.getMessage(), e);
+        }
+    }
+
     private void handleMessage(MqttMessage message) {
         try {
             TelemetryPayload payload = objectMapper.readValue(message.getPayload(), TelemetryPayload.class);
